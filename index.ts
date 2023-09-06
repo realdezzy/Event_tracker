@@ -1,3 +1,4 @@
+import { PoolConnection, FieldPacket, RowDataPacket, ResultSetHeader } from 'mysql2/promise';
 import { 
     publicClientETH,
     publicClientBSC,
@@ -6,6 +7,8 @@ import {
     publicClientOPTIMISM,
     publicClientPOLYGON
  } from './client';
+import { pool } from './dbPromise';
+import { logger } from './logger';
 import { parseAbi, PublicClient } from 'viem';
 import { Address } from 'viem';
 import express, { Express, Request, Response } from 'express';
@@ -16,6 +19,17 @@ dotenv.config();
 
 const app: Express = express();
 const port = process.env.PORT || 5000;
+
+interface EventsData extends RowDataPacket {
+    id: number;
+    address: string;
+    chain: string;
+    lastBlock: bigint;
+}
+
+interface InsertResult extends ResultSetHeader {
+
+};
 
 type Client = {
     mainnet: PublicClient;
@@ -30,7 +44,7 @@ const clients: Client = {
     'bsc': publicClientBSC,
     'polygon': publicClientPOLYGON,
     'arbitrum': publicClientARBITRUM,
-    'fantom': publicClientFTM
+    'fantom': publicClientFTM,
 };
 
 const pollInterval = 15000;
@@ -48,7 +62,7 @@ app.get('/add', async (req: Request, res: Response) => {
         await processLogs(address, chain);
         res.send(`Monitoring ${address} on chain ${chain}`);
     } catch (error) {
-        console.error(error);
+        logger.error(error);
         res.status(500).send('An error occurred while processing logs.');
     }
 });
@@ -62,28 +76,65 @@ app.get('/addAllChains', async (req: Request, res: Response) => {
         }
         res.send(`Monitoring ${address} on supported chains`);
     } catch (error) {
-        console.error(error);
+        logger.error(error);
         res.status(500).send('An error occurred while processing logs.');
     }
 });
 
-app.listen(port, () => {
-    console.log(`⚡️[server]: Server is running at http://localhost:${port}`);
-});
+//correct the type errors below
 
 async function processLogs(address: Address, chain: string) {
+    const lastBlockQuery = `SELECT lastBlock FROM events_tracker WHERE address = ? and chain = ?;`;
+    const updateBlockQuery = `UPDATE events_tracker SET lastBlock = ? WHERE address = ? AND chain = ?`;
     const publicClient: PublicClient = clients[chain as keyof Client];
-    let lastBlock: bigint;
 
+    let lastBlock: bigint | undefined;
+
+    let connection: PoolConnection | undefined;
     try {
-        lastBlock = await publicClient.getBlockNumber();
-    } catch (error) {
-        throw new Error(`Error getting last block number for chain '${chain}': ${error}`);
+        // Get a connection from the pool
+        connection = await pool.getConnection();
+
+        // Check if the combination of address and chain already exists in the database
+        const checkExistenceQuery = `SELECT COUNT(*) as count FROM events_tracker WHERE address = ? AND chain = ?`;
+        const [rows]: [EventsData[], FieldPacket[]] = await connection.execute(checkExistenceQuery, [address, chain]);
+        const rowCount: number = rows[0].count;
+
+        if (rowCount === 0) {
+            try {
+                lastBlock = await publicClient.getBlockNumber();
+                
+                // Insert the address and chain into the database if they don't exist
+                const insertAddressQuery = `INSERT INTO events_tracker (address, chain, lastBlock) VALUES (?, ?, ?)`;
+                const insertResult: any = await connection.execute(insertAddressQuery, [address, chain, lastBlock]);
+                if (insertResult.insertId) {
+                    logger.info(`Inserted new record for address '${address}' on chain '${chain}'.`);
+                }
+            } catch (error) {
+                logger.error(error);
+            }
+        } else {
+            // Retrieve the lastBlock value from the database
+            const [selectResult]: [EventsData[], FieldPacket[]] = await connection.execute(lastBlockQuery, [address, chain]);
+            lastBlock = BigInt(selectResult[0]?.lastBlock);
+        }
+    } catch (err) {
+        logger.error(err);
+    } finally {
+        if (connection) {
+            connection.release(); // Release the connection back to the pool
+        }
     }
 
+    if (lastBlock === undefined) {
+        return; // Handle error or exit if lastBlock is undefined
+    }
+
+    // Rest of the processLogs function remains the same
     const getLogs = async () => {
         try {
             const currentBlock = await publicClient.getBlockNumber();
+            //@ts-ignore
             if (currentBlock > lastBlock) {
                 const logs = await publicClient.getLogs({
                     address: address,
@@ -101,20 +152,37 @@ async function processLogs(address: Address, chain: string) {
                         // Make your API call here if needed
                     });
                 }
+                await updateLastBlockInDatabase(currentBlock, address, chain);
                 lastBlock = currentBlock;
             }
         } catch (error) {
-            console.error(`Error while processing logs for chain '${chain}': ${error}`);
+            logger.error(`Error while processing logs for chain '${chain}': ${error}`);
         }
-    };
+    }
 
     const interval = setInterval(getLogs, pollInterval);
 
     // Stop the interval after a specific number of polls or time
     setTimeout(() => {
         clearInterval(interval);
-        console.log(`Stopped polling for chain '${chain}'`);
+        console.log(`Stopped polling`);
     }, 1000000); // Adjust the time as needed
+}
+
+
+async function updateLastBlockInDatabase(newBlock: bigint, address: Address, chain: string) {
+    try {
+        const connection = await pool.getConnection();
+        const updateBlockQuery = `UPDATE events_tracker SET lastBlock = ? WHERE address = ? AND chain = ?`;
+        const [updateResult]: [ResultSetHeader, FieldPacket[]] = await connection.execute(updateBlockQuery, [newBlock, address, chain]);
+        connection.release();
+
+        if (updateResult.affectedRows === 1) {
+            logger.info(`Updated lastBlock for address '${address}' on chain '${chain}' to ${newBlock}.`);
+        }
+    } catch (error) {
+        logger.error(`Error updating lastBlock in database: ${error}`);
+    }
 }
 
 
@@ -122,3 +190,12 @@ async function processLogs(address: Address, chain: string) {
 async function makeApiCall() {
     const response = await axios.get("https://swapi.dev/api/people/1")
 }
+
+function main() {
+    app.listen(port, () => {
+        console.log(`⚡️[server]: Server is running at http://localhost:${port}`);
+    });
+
+}
+
+main();
