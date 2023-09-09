@@ -6,7 +6,7 @@ export const pool: Pool = mysql.createPool({
   user: 'root',
   password: 'root',
   database: 'events_db',
-  waitForConnections: true,
+  waitForConnections: false,
   connectionLimit: 10,
   maxIdle: 10,
   idleTimeout: 60000,
@@ -62,7 +62,7 @@ async function dropTable() {
     console.error('Error dropping table:', error);
   } finally {
     if (connection) {
-      connection.end(); // Release the connection back to the pool
+      connection.release(); // Release the connection back to the pool
     }
   }
 }

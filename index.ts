@@ -81,6 +81,16 @@ app.get('/addAllChains', async (req: Request, res: Response) => {
     }
 });
 
+app.get('/restartAll', async (req: Request, res: Response) => {
+    try {
+        await restartAllMonitoring();
+        res.send('Restarted monitoring for all addresses in the database.');
+    } catch (error) {
+        logger.error(error);
+        res.status(500).send('An error occurred while restarting monitoring.');
+    }
+});
+
 //correct the type errors below
 
 async function processLogs(address: Address, chain: string) {
@@ -140,7 +150,6 @@ async function processLogs(address: Address, chain: string) {
                     address: address,
                     events: parseAbi([ 
                         'event Approval(address indexed owner, address indexed sender, uint256 value)',
-                        'event Transfer(address indexed from, address indexed to, uint256 value)',
                     ]),
                     fromBlock: lastBlock,
                     toBlock: currentBlock,
@@ -148,7 +157,7 @@ async function processLogs(address: Address, chain: string) {
 
                 if (Array.isArray(logs)) {
                     logs.forEach(element => {
-                        console.log(element);
+                        console.log(element.args);
                         // Make your API call here if needed
                     });
                 }
@@ -162,11 +171,11 @@ async function processLogs(address: Address, chain: string) {
 
     const interval = setInterval(getLogs, pollInterval);
 
-    // Stop the interval after a specific number of polls or time
-    setTimeout(() => {
-        clearInterval(interval);
-        console.log(`Stopped polling`);
-    }, 1000000); // Adjust the time as needed
+    // // Stop the interval after a specific number of polls or time
+    // setTimeout(() => {
+    //     clearInterval(interval);
+    //     console.log(`Stopped polling`);
+    // }, 1000000); // Adjust the time as needed
 }
 
 
@@ -185,6 +194,23 @@ async function updateLastBlockInDatabase(newBlock: bigint, address: Address, cha
     }
 }
 
+async function restartAllMonitoring() {
+    for (const chain of supportedChains) {
+        try {
+            // Get all addresses from the database for the current chain
+            const addressesQuery = `SELECT DISTINCT address FROM events_tracker WHERE chain = ?`;
+            const [addressesResult]: [EventsData[], FieldPacket[]] = await pool.execute(addressesQuery, [chain]);
+            const addresses: string[] = addressesResult.map((row) => row.address);
+
+            // Restart monitoring for each address
+            for (const address of addresses) {
+                await processLogs(<Address>address, chain);
+            }
+        } catch (error) {
+            logger.error(`Error while restarting monitoring for chain '${chain}': ${error}`);
+        }
+    }
+}
 
 //Send request to external api
 async function makeApiCall() {
